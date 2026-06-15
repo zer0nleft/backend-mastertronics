@@ -3,22 +3,9 @@ const cors = require('cors');
 const { Pool } = require('pg');
 
 const app = express();
-const port = 3000;
-const contraseña = '123456'
 // Configuración de middlewares
 app.use(cors());
 app.use(express.json()); // Para poder leer los datos que manda la app
-
-// Configuración de la conexión a PostgreSQL
-// Asegúrate de cambiar la contraseña y el usuario si son diferentes
-
-/*const pool = new Pool({
-  user: 'postgres',
-  host: '127.0.0.1', // <--- EL CAMBIO MÁGICO ESTÁ AQUÍ
-  database: 'mastertronics_db',
-  password: '123456', 
-  port: 5432,
-}); */
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -33,7 +20,6 @@ app.get('/logs', async (req, res) => {
     const offset = (page - 1) * limit;
     const date = req.query.date; 
 
-    // CAMBIO: Ahora cruzamos los datos con LEFT JOIN para obtener first_name y last_name
     let queryStr = `
       SELECT al.*, w.first_name, w.last_name 
       FROM access_logs al
@@ -42,9 +28,10 @@ app.get('/logs', async (req, res) => {
     let countQueryStr = 'SELECT COUNT(*) FROM access_logs al';
     let queryParams = [];
     
-    if (date) {
-      queryStr += ' WHERE al.created_at::date = $1';
-      countQueryStr += ' WHERE al.created_at::date = $1';
+    // CAMBIO APLICADO: Protección contra 'undefined' y ajuste de zona horaria a Venezuela
+    if (date && date !== 'undefined' && date !== 'null') {
+      queryStr += " WHERE timezone('America/Caracas', al.created_at)::date = $1";
+      countQueryStr += " WHERE timezone('America/Caracas', al.created_at)::date = $1";
       queryParams.push(date);
     }
 
@@ -90,18 +77,15 @@ app.post('/logs', async (req, res) => {
   }
 });
 
-
-
-
-
 // GET: Resumen de estadísticas generales
 app.get('/stats/summary', async (req, res) => {
   try {
+    // CAMBIO APLICADO: Ajuste de zona horaria para que 'today_logs' sea exacto
     const stats = await pool.query(`
       SELECT 
         (SELECT COUNT(*) FROM access_logs) as total_logs,
         (SELECT COUNT(*) FROM workers) as total_users,
-        (SELECT COUNT(*) FROM access_logs WHERE created_at::date = CURRENT_DATE) as today_logs,
+        (SELECT COUNT(*) FROM access_logs WHERE timezone('America/Caracas', created_at)::date = timezone('America/Caracas', NOW())::date) as today_logs,
         (SELECT COUNT(*) FROM access_logs WHERE is_unlocked = true) as total_unlocks
     `);
     res.json(stats.rows[0]);
@@ -127,27 +111,13 @@ app.get('/stats/top-users', async (req, res) => {
   }
 });
 
-
-
-
-
-
-
-
-
 // ==========================================
 // RUTAS CRUD PARA USUARIOS (WORKERS)
 // ==========================================
 
-
-
-
-
-// GET: Leer todos los usuarios
 // GET: Leer todos los usuarios
 app.get('/workers', async (req, res) => {
   try {
-    // CAMBIO: ORDER BY id ASC
     const result = await pool.query('SELECT * FROM workers ORDER BY id ASC'); 
     res.json(result.rows);
   } catch (error) {
@@ -164,7 +134,7 @@ app.post('/workers', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO workers (first_name, last_name, worker_code, access_level, password) 
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [first_name, last_name, worker_code, access_level || 0, password || '1234'] // 1234 por defecto si lo dejan vacío
+      [first_name, last_name, worker_code, access_level || 0, password || '1234'] 
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -194,14 +164,12 @@ app.put('/workers/:id', async (req, res) => {
 app.delete('/workers/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    // CAMBIO: WHERE id = $1
     await pool.query('DELETE FROM workers WHERE id = $1', [id]); 
     res.json({ message: 'Usuario eliminado exitosamente' });
   } catch (error) {
     res.status(500).json({ error: 'No se puede eliminar.' });
   }
 });
-
 
 // GET: Obtener los logs de un usuario con Paginación y Filtro de Fecha
 app.get('/logs/user/:id', async (req, res) => {
@@ -212,7 +180,6 @@ app.get('/logs/user/:id', async (req, res) => {
     const offset = (page - 1) * limit;
     const date = req.query.date;
 
-    // CAMBIO: También agregamos el JOIN aquí por consistencia
     let queryStr = `
       SELECT al.*, w.first_name, w.last_name 
       FROM access_logs al
@@ -222,9 +189,10 @@ app.get('/logs/user/:id', async (req, res) => {
     let countQueryStr = 'SELECT COUNT(*) FROM access_logs al WHERE al.nfc_card_id = $1';
     let queryParams = [id];
 
-    if (date) {
-      queryStr += ' AND al.created_at::date = $2';
-      countQueryStr += ' AND al.created_at::date = $2';
+    // CAMBIO APLICADO: Protección contra 'undefined' y ajuste de zona horaria
+    if (date && date !== 'undefined' && date !== 'null') {
+      queryStr += " AND timezone('America/Caracas', al.created_at)::date = $2";
+      countQueryStr += " AND timezone('America/Caracas', al.created_at)::date = $2";
       queryParams.push(date);
     }
 
@@ -247,11 +215,11 @@ app.get('/logs/user/:id', async (req, res) => {
   }
 });
 
-
 // GET: Obtener logs en un rango de fechas para el Reporte PDF
 app.get('/logs/report', async (req, res) => {
   const { startDate, endDate } = req.query;
   try {
+    // CAMBIO APLICADO: Ajuste de zona horaria en el reporte
     const result = await pool.query(`
       SELECT 
         al.created_at, 
@@ -262,7 +230,7 @@ app.get('/logs/report', async (req, res) => {
         al.is_unlocked
       FROM access_logs al
       JOIN workers w ON al.nfc_card_id = w.id
-      WHERE al.created_at::date >= $1 AND al.created_at::date <= $2
+      WHERE timezone('America/Caracas', al.created_at)::date >= $1 AND timezone('America/Caracas', al.created_at)::date <= $2
       ORDER BY al.created_at DESC
     `, [startDate, endDate]);
     
@@ -292,11 +260,9 @@ app.post('/login', async (req, res) => {
   }
 });
 
-
 // GET: Consultar el estado actual del candado físico
 app.get('/hardware/lock-status', async (req, res) => {
   try {
-    // Buscamos el último log registrado del candado #1
     const result = await pool.query(`
       SELECT is_unlocked 
       FROM access_logs 
@@ -305,17 +271,12 @@ app.get('/hardware/lock-status', async (req, res) => {
       LIMIT 1
     `);
 
-    // Si hay registros, devolvemos el estado. Si no hay, asumimos que está bloqueado (false)
     const isUnlocked = result.rows.length > 0 ? result.rows[0].is_unlocked : false;
-    
     res.json({ unlocked: isUnlocked });
   } catch (error) {
     res.status(500).json({ error: 'Error leyendo estado del hardware' });
   }
 });
-
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
