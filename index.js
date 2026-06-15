@@ -281,7 +281,7 @@ app.get('/hardware/lock-status', async (req, res) => {
 
 
 // CONSULTAR ESTADO DEL CANDADO EN TIEMPO REAL
-export const getLockStatus = async () => {
+const getLockStatus = async () => {
   try {
     const response = await fetch(`${API_URL}/hardware/lock-status`);
     if (!response.ok) throw new Error("Error al consultar el estado del hardware");
