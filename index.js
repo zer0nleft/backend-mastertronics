@@ -278,6 +278,22 @@ app.get('/hardware/lock-status', async (req, res) => {
   }
 });
 
+
+
+// CONSULTAR ESTADO DEL CANDADO EN TIEMPO REAL
+export const getLockStatus = async () => {
+  try {
+    const response = await fetch(`${API_URL}/hardware/lock-status`);
+    if (!response.ok) throw new Error("Error al consultar el estado del hardware");
+    return await response.json(); // Esto devuelve { unlocked: true/false }
+  } catch (error) {
+    console.error("Error obteniendo estado del candado:", error);
+    return { unlocked: false }; // Estado seguro por defecto si falla la red
+  }
+};
+
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);
