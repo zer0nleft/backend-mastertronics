@@ -1,18 +1,89 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const mongoose = require('mongoose');
 
 const app = express();
-// Configuración de middlewares
 app.use(cors());
-app.use(express.json()); // Para poder leer los datos que manda la app
+app.use(express.json());
 
+// ==========================================
+// 1. CONEXIONES A BASES DE DATOS (POLÍGLOTA)
+// ==========================================
+
+// PostgreSQL (Para Usuarios/Workers)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Render requiere SSL para conexiones externas
+  ssl: { rejectUnauthorized: false }
 });
 
-// Ruta 1: Obtener logs con Paginación y Nombres (GET /logs)
+// MongoDB Atlas (Para Logs/Historial en tiempo real)
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('¡Conexión políglota exitosa a MongoDB Atlas!'))
+  .catch((err) => console.error('Error conectando a MongoDB:', err));
+
+// ==========================================
+// 2. MODELO DE MONGOOSE PARA LOS LOGS
+// ==========================================
+const logSchema = new mongoose.Schema({
+  lock_id: Number,
+  worker_id: Number,      
+  first_name: String,     
+  last_name: String,
+  action_type: String,
+  is_unlocked: Boolean,
+  created_at: { type: Date, default: Date.now } 
+});
+
+const AccessLog = mongoose.model('AccessLog', logSchema);
+
+// Función auxiliar para calcular rangos de fecha en hora de Venezuela (-04:00)
+const getCaracasDateRange = (dateStr) => {
+  const startOfDay = new Date(`${dateStr}T00:00:00-04:00`);
+  const endOfDay = new Date(`${dateStr}T23:59:59-04:00`);
+  return { startOfDay, endOfDay };
+};
+
+// ==========================================
+// 3. RUTAS DE HISTORIAL Y HARDWARE (MIGRADO A MONGODB)
+// ==========================================
+
+// POST: Guardar un nuevo acceso (El Puente Políglota)
+app.post('/logs', async (req, res) => {
+  const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
+
+  try {
+    // 1. Buscamos la identidad en PostgreSQL
+    const userResult = await pool.query(
+      'SELECT first_name, last_name FROM workers WHERE id = $1', 
+      [nfc_card_id]
+    );
+    const user = userResult.rows[0] || { first_name: 'Usuario', last_name: 'Desconocido' };
+
+    // 2. Guardamos todo el paquete en MongoDB
+    const nuevoLog = new AccessLog({
+      lock_id,
+      worker_id: nfc_card_id,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      action_type,
+      is_unlocked
+    });
+
+    await nuevoLog.save();
+    
+    // Adaptamos la respuesta para que la App no se rompa (MongoDB usa _id en vez de id)
+    const logData = nuevoLog.toObject();
+    logData.id = logData._id; 
+    
+    res.status(201).json(logData);
+  } catch (error) {
+    console.error("Error en escritura políglota:", error);
+    res.status(500).json({ error: 'Error al insertar en MongoDB' });
+  }
+});
+
+// GET: Obtener logs con Paginación (Desde MongoDB)
 app.get('/logs', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -20,116 +91,149 @@ app.get('/logs', async (req, res) => {
     const offset = (page - 1) * limit;
     const date = req.query.date; 
 
-    let queryStr = `
-      SELECT al.*, w.first_name, w.last_name 
-      FROM access_logs al
-      LEFT JOIN workers w ON al.nfc_card_id = w.id
-    `;
-    let countQueryStr = 'SELECT COUNT(*) FROM access_logs al';
-    let queryParams = [];
+    let query = {};
     
-    // CAMBIO APLICADO: Protección contra 'undefined' y ajuste de zona horaria a Venezuela
     if (date && date !== 'undefined' && date !== 'null') {
-      queryStr += " WHERE timezone('America/Caracas', al.created_at)::date = $1";
-      countQueryStr += " WHERE timezone('America/Caracas', al.created_at)::date = $1";
-      queryParams.push(date);
+      const { startOfDay, endOfDay } = getCaracasDateRange(date);
+      query.created_at = { $gte: startOfDay, $lte: endOfDay };
     }
 
-    const limitParamIndex = queryParams.length + 1;
-    const offsetParamIndex = queryParams.length + 2;
-    queryStr += ` ORDER BY al.created_at DESC LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`;
-    
-    const [result, countResult] = await Promise.all([
-      pool.query(queryStr, [...queryParams, limit, offset]),
-      pool.query(countQueryStr, queryParams)
+    // Ejecutamos búsqueda y conteo en paralelo en Atlas
+    const [result, totalItems] = await Promise.all([
+      AccessLog.find(query).sort({ created_at: -1 }).skip(offset).limit(limit),
+      AccessLog.countDocuments(query)
     ]);
 
-    const totalItems = parseInt(countResult.rows[0].count);
     const totalPages = Math.ceil(totalItems / limit);
 
-    res.json({
-      data: result.rows,
-      currentPage: page,
-      totalPages: totalPages === 0 ? 1 : totalPages,
-      totalItems: totalItems
-    });
+    // Mapeamos para enviar "id" en lugar de "_id"
+    const data = result.map(doc => ({
+      id: doc._id, lock_id: doc.lock_id, worker_id: doc.worker_id,
+      first_name: doc.first_name, last_name: doc.last_name,
+      action_type: doc.action_type, is_unlocked: doc.is_unlocked, created_at: doc.created_at
+    }));
+
+    res.json({ data, currentPage: page, totalPages: totalPages === 0 ? 1 : totalPages, totalItems });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    res.status(500).json({ error: 'Error leyendo MongoDB' });
   }
 });
 
-// Ruta 2: Guardar un nuevo acceso (POST /logs)
-app.post('/logs', async (req, res) => {
-  const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
-
+// GET: Obtener logs de un usuario específico (Desde MongoDB)
+app.get('/logs/user/:id', async (req, res) => {
   try {
-    const result = await pool.query(
-      `INSERT INTO access_logs (lock_id, nfc_card_id, action_type, is_unlocked) 
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [lock_id, nfc_card_id, action_type, is_unlocked]
-    );
-    
-    res.status(201).json(result.rows[0]);
+    const { id } = req.params;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const date = req.query.date;
+
+    let query = { worker_id: parseInt(id) };
+
+    if (date && date !== 'undefined' && date !== 'null') {
+      const { startOfDay, endOfDay } = getCaracasDateRange(date);
+      query.created_at = { $gte: startOfDay, $lte: endOfDay };
+    }
+
+    const [result, totalItems] = await Promise.all([
+      AccessLog.find(query).sort({ created_at: -1 }).skip(offset).limit(limit),
+      AccessLog.countDocuments(query)
+    ]);
+
+    const data = result.map(doc => ({ id: doc._id, ...doc._doc }));
+    const totalPages = Math.ceil(totalItems / limit);
+
+    res.json({ data, currentPage: page, totalPages: totalPages === 0 ? 1 : totalPages, totalItems });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al insertar en PostgreSQL' });
+    res.status(500).json({ error: 'Error obteniendo historial del usuario en MongoDB' });
   }
 });
 
-// GET: Resumen de estadísticas generales
+// GET: Consultar el estado actual del candado físico (Sincronización App/ESP32)
+app.get('/hardware/lock-status', async (req, res) => {
+  try {
+    const ultimoLog = await AccessLog.findOne({ lock_id: 1 }).sort({ created_at: -1 });
+    const isUnlocked = ultimoLog ? ultimoLog.is_unlocked : false;
+    res.json({ unlocked: isUnlocked });
+  } catch (error) {
+    res.status(500).json({ error: 'Error leyendo estado del hardware en MongoDB' });
+  }
+});
+
+// GET: Reporte PDF de fechas (Desde MongoDB)
+app.get('/logs/report', async (req, res) => {
+  const { startDate, endDate } = req.query;
+  try {
+    const start = new Date(`${startDate}T00:00:00-04:00`);
+    const end = new Date(`${endDate}T23:59:59-04:00`);
+    
+    const result = await AccessLog.find({ created_at: { $gte: start, $lte: end } }).sort({ created_at: -1 });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Error generando reporte desde MongoDB' });
+  }
+});
+
+// ==========================================
+// 4. ESTADÍSTICAS (MONGODB + POSTGRESQL)
+// ==========================================
+
 app.get('/stats/summary', async (req, res) => {
   try {
-    // CAMBIO APLICADO: Ajuste de zona horaria para que 'today_logs' sea exacto
-    const stats = await pool.query(`
-      SELECT 
-        (SELECT COUNT(*) FROM access_logs) as total_logs,
-        (SELECT COUNT(*) FROM workers) as total_users,
-        (SELECT COUNT(*) FROM access_logs WHERE timezone('America/Caracas', created_at)::date = timezone('America/Caracas', NOW())::date) as today_logs,
-        (SELECT COUNT(*) FROM access_logs WHERE is_unlocked = true) as total_unlocks
-    `);
-    res.json(stats.rows[0]);
+    const tzDate = new Date();
+    const year = tzDate.getFullYear();
+    const month = String(tzDate.getMonth() + 1).padStart(2, '0');
+    const day = String(tzDate.getDate()).padStart(2, '0');
+    const { startOfDay, endOfDay } = getCaracasDateRange(`${year}-${month}-${day}`);
+
+    const [totalLogs, todayLogs, totalUnlocks, usersResult] = await Promise.all([
+      AccessLog.countDocuments(),
+      AccessLog.countDocuments({ created_at: { $gte: startOfDay, $lte: endOfDay } }),
+      AccessLog.countDocuments({ is_unlocked: true }),
+      pool.query('SELECT COUNT(*) as count FROM workers')
+    ]);
+
+    res.json({
+      total_logs: totalLogs,
+      total_users: parseInt(usersResult.rows[0].count),
+      today_logs: todayLogs,
+      total_unlocks: totalUnlocks
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// GET: Usuarios con más actividad (Top 5)
 app.get('/stats/top-users', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT w.first_name, w.last_name, COUNT(al.id) as activity_count
-      FROM access_logs al
-      JOIN workers w ON al.nfc_card_id = w.id
-      GROUP BY w.id, w.first_name, w.last_name
-      ORDER BY activity_count DESC
-      LIMIT 5
-    `);
-    res.json(result.rows);
+    // Pipeline de agregación rápida en MongoDB
+    const topUsers = await AccessLog.aggregate([
+      { $group: { _id: "$worker_id", first_name: { $first: "$first_name" }, last_name: { $first: "$last_name" }, activity_count: { $sum: 1 } } },
+      { $sort: { activity_count: -1 } },
+      { $limit: 5 }
+    ]);
+    res.json(topUsers);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // ==========================================
-// RUTAS CRUD PARA USUARIOS (WORKERS)
+// 5. RUTAS CRUD PARA USUARIOS (MANTENIDAS EN POSTGRESQL)
 // ==========================================
 
-// GET: Leer todos los usuarios
 app.get('/workers', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM workers ORDER BY id ASC'); 
     res.json(result.rows);
   } catch (error) {
-    console.error(error.message);
     res.status(500).json({ error: 'Error obteniendo usuarios' });
   }
 });
 
-// POST: Crear un nuevo usuario (CON CONTRASEÑA)
 app.post('/workers', async (req, res) => {
   const { first_name, last_name, worker_code, access_level, password } = req.body;
-  
   try {
     const result = await pool.query(
       `INSERT INTO workers (first_name, last_name, worker_code, access_level, password) 
@@ -138,19 +242,16 @@ app.post('/workers', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error("Error al crear usuario en BD:", error.message);
     res.status(500).json({ error: 'Error creando usuario' });
   }
 });
 
-// PUT: Actualizar un usuario existente (CON CONTRASEÑA)
 app.put('/workers/:id', async (req, res) => {
   const { id } = req.params;
   const { first_name, last_name, worker_code, access_level, password } = req.body;
   try {
     const result = await pool.query(
-      `UPDATE workers 
-       SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4, password = $5 
+      `UPDATE workers SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4, password = $5 
        WHERE id = $6 RETURNING *`, 
       [first_name, last_name, worker_code, access_level, password, id]
     );
@@ -160,7 +261,6 @@ app.put('/workers/:id', async (req, res) => {
   }
 });
 
-// DELETE: Eliminar un usuario
 app.delete('/workers/:id', async (req, res) => {
   const { id } = req.params;
   try {
@@ -171,77 +271,6 @@ app.delete('/workers/:id', async (req, res) => {
   }
 });
 
-// GET: Obtener los logs de un usuario con Paginación y Filtro de Fecha
-app.get('/logs/user/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
-    const date = req.query.date;
-
-    let queryStr = `
-      SELECT al.*, w.first_name, w.last_name 
-      FROM access_logs al
-      LEFT JOIN workers w ON al.nfc_card_id = w.id
-      WHERE al.nfc_card_id = $1
-    `;
-    let countQueryStr = 'SELECT COUNT(*) FROM access_logs al WHERE al.nfc_card_id = $1';
-    let queryParams = [id];
-
-    // CAMBIO APLICADO: Protección contra 'undefined' y ajuste de zona horaria
-    if (date && date !== 'undefined' && date !== 'null') {
-      queryStr += " AND timezone('America/Caracas', al.created_at)::date = $2";
-      countQueryStr += " AND timezone('America/Caracas', al.created_at)::date = $2";
-      queryParams.push(date);
-    }
-
-    const limitIndex = queryParams.length + 1;
-    const offsetIndex = queryParams.length + 2;
-    queryStr += ` ORDER BY al.created_at DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
-
-    const [result, countResult] = await Promise.all([
-      pool.query(queryStr, [...queryParams, limit, offset]),
-      pool.query(countQueryStr, queryParams)
-    ]);
-
-    const totalItems = parseInt(countResult.rows[0].count);
-    const totalPages = Math.ceil(totalItems / limit);
-
-    res.json({ data: result.rows, currentPage: page, totalPages: totalPages === 0 ? 1 : totalPages, totalItems });
-  } catch (error) {
-    console.error("Error filtrando logs paginados:", error.message);
-    res.status(500).json({ error: 'Error obteniendo historial' });
-  }
-});
-
-// GET: Obtener logs en un rango de fechas para el Reporte PDF
-app.get('/logs/report', async (req, res) => {
-  const { startDate, endDate } = req.query;
-  try {
-    // CAMBIO APLICADO: Ajuste de zona horaria en el reporte
-    const result = await pool.query(`
-      SELECT 
-        al.created_at, 
-        w.first_name, 
-        w.last_name, 
-        al.lock_id, 
-        al.action_type, 
-        al.is_unlocked
-      FROM access_logs al
-      JOIN workers w ON al.nfc_card_id = w.id
-      WHERE timezone('America/Caracas', al.created_at)::date >= $1 AND timezone('America/Caracas', al.created_at)::date <= $2
-      ORDER BY al.created_at DESC
-    `, [startDate, endDate]);
-    
-    res.json(result.rows);
-  } catch (error) {
-    console.error("Error generando datos para reporte:", error);
-    res.status(500).json({ error: 'Error al generar datos del reporte' });
-  }
-});
-
-// POST: Iniciar sesión
 app.post('/login', async (req, res) => {
   const { worker_code, password } = req.body;
   try {
@@ -259,40 +288,6 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Error en el servidor' });
   }
 });
-
-// GET: Consultar el estado actual del candado físico
-app.get('/hardware/lock-status', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT is_unlocked 
-      FROM access_logs 
-      WHERE lock_id = 1 
-      ORDER BY created_at DESC 
-      LIMIT 1
-    `);
-
-    const isUnlocked = result.rows.length > 0 ? result.rows[0].is_unlocked : false;
-    res.json({ unlocked: isUnlocked });
-  } catch (error) {
-    res.status(500).json({ error: 'Error leyendo estado del hardware' });
-  }
-});
-
-
-
-// CONSULTAR ESTADO DEL CANDADO EN TIEMPO REAL
-const getLockStatus = async () => {
-  try {
-    const response = await fetch(`${API_URL}/hardware/lock-status`);
-    if (!response.ok) throw new Error("Error al consultar el estado del hardware");
-    return await response.json(); // Esto devuelve { unlocked: true/false }
-  } catch (error) {
-    console.error("Error obteniendo estado del candado:", error);
-    return { unlocked: false }; // Estado seguro por defecto si falla la red
-  }
-};
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
