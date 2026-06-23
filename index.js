@@ -49,19 +49,34 @@ const getCaracasDateRange = (dateStr) => {
 // 3. RUTAS DE HISTORIAL Y HARDWARE (MIGRADO A MONGODB)
 // ==========================================
 
-// POST: Guardar un nuevo acceso (El Puente Políglota)
+// POST: Guardar un nuevo acceso (El Puente Políglota con Cooldown)
 app.post('/logs', async (req, res) => {
   const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
 
   try {
-    // 1. Buscamos la identidad en PostgreSQL
+    // 1. VERIFICACIÓN DE COOLDOWN DE 3 SEGUNDOS EN LA NUBE
+    const ultimoLog = await AccessLog.findOne({ lock_id: lock_id }).sort({ created_at: -1 });
+    
+    if (ultimoLog) {
+      const tiempoTranscurrido = Date.now() - new Date(ultimoLog.created_at).getTime();
+      
+      if (tiempoTranscurrido < 3000) { 
+        // Si han pasado menos de 3000 ms, rechazamos la petición
+        return res.status(429).json({ 
+          error: 'cooldown', 
+          message: 'El candado ya está abierto' 
+        });
+      }
+    }
+
+    // 2. Buscamos la identidad en PostgreSQL
     const userResult = await pool.query(
       'SELECT first_name, last_name FROM workers WHERE id = $1', 
       [nfc_card_id]
     );
     const user = userResult.rows[0] || { first_name: 'Usuario', last_name: 'Desconocido' };
 
-    // 2. Guardamos todo el paquete en MongoDB
+    // 3. Guardamos todo el paquete en MongoDB
     const nuevoLog = new AccessLog({
       lock_id,
       worker_id: nfc_card_id,
