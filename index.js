@@ -24,7 +24,7 @@ mongoose.connect(process.env.MONGO_URI)
   .catch((err) => console.error('Error conectando a MongoDB:', err));
 
 // ==========================================
-// 2. MODELO DE MONGOOSE PARA LOS LOGS
+// 2. MODELOS Y VARIABLES EN MEMORIA
 // ==========================================
 const logSchema = new mongoose.Schema({
   lock_id: Number,
@@ -45,8 +45,13 @@ const getCaracasDateRange = (dateStr) => {
   return { startOfDay, endOfDay };
 };
 
+// COLA DE COMANDOS DE HARDWARE (BUZÓN DE UN SOLO USO)
+const comandosPendientes = {
+  1: false // El candado con ID 1 empieza en reposo (buzón vacío)
+};
+
 // ==========================================
-// 3. RUTAS DE HISTORIAL Y HARDWARE (MIGRADO A MONGODB)
+// 3. RUTAS DE HISTORIAL Y HARDWARE (MONGODB)
 // ==========================================
 
 // POST: Guardar un nuevo acceso (El Puente Políglota con Cooldown)
@@ -87,6 +92,9 @@ app.post('/logs', async (req, res) => {
     });
 
     await nuevoLog.save();
+    
+    // 4. Dejamos el mensaje de "Abrir" en el buzón para el ESP32
+    comandosPendientes[lock_id] = true; 
     
     // Adaptamos la respuesta para que la App no se rompa (MongoDB usa _id en vez de id)
     const logData = nuevoLog.toObject();
@@ -166,14 +174,18 @@ app.get('/logs/user/:id', async (req, res) => {
   }
 });
 
-// GET: Consultar el estado actual del candado físico (Sincronización App/ESP32)
+// GET: Consultar el estado actual del candado físico (Patrón de Consumo)
 app.get('/hardware/lock-status', async (req, res) => {
   try {
-    const ultimoLog = await AccessLog.findOne({ lock_id: 1 }).sort({ created_at: -1 });
-    const isUnlocked = ultimoLog ? ultimoLog.is_unlocked : false;
+    // 1. Leemos si hay un mensaje de apertura pendiente en nuestro buzón
+    const isUnlocked = comandosPendientes[1] || false;
+    
+    // 2. LA MAGIA: Inmediatamente después de leerlo, vaciamos el buzón.
+    comandosPendientes[1] = false; 
+
     res.json({ unlocked: isUnlocked });
   } catch (error) {
-    res.status(500).json({ error: 'Error leyendo estado del hardware en MongoDB' });
+    res.status(500).json({ error: 'Error leyendo estado del hardware' });
   }
 });
 
@@ -242,7 +254,6 @@ app.get('/stats/top-users', async (req, res) => {
 // GET: Leer todos los usuarios (Blindado: No envía contraseñas)
 app.get('/workers', async (req, res) => {
   try {
-    // Especificamos exactamente qué columnas queremos, omitiendo 'password'
     const result = await pool.query(`
       SELECT id, first_name, last_name, worker_code, access_level 
       FROM workers 
@@ -259,9 +270,7 @@ app.post('/workers', async (req, res) => {
   const { first_name, last_name, worker_code, access_level, password } = req.body;
   
   try {
-    // 1. Definimos la complejidad del encriptado (10 es el estándar seguro y rápido)
     const saltRounds = 10;
-    // 2. Encriptamos la contraseña (o '1234' si viene vacía)
     const hashedPassword = await bcrypt.hash(password || '1234', saltRounds);
 
     const result = await pool.query(
@@ -270,7 +279,6 @@ app.post('/workers', async (req, res) => {
       [first_name, last_name, worker_code, access_level || 0, hashedPassword] 
     );
     
-    // Evitamos enviar el hash de vuelta a la app por seguridad
     const nuevoUsuario = result.rows[0];
     delete nuevoUsuario.password;
     
@@ -289,9 +297,8 @@ app.put('/workers/:id', async (req, res) => {
   try {
     let result;
 
-    // Evaluamos si el frontend envió una contraseña que no esté en blanco
     if (password && password.trim() !== '') {
-      // 1. Camino A: El usuario SÍ quiere cambiar la contraseña
+      // Camino A: El usuario SÍ quiere cambiar la contraseña
       const saltRounds = 10;
       const hashedPassword = await bcrypt.hash(password, saltRounds);
 
@@ -302,7 +309,7 @@ app.put('/workers/:id', async (req, res) => {
         [first_name, last_name, worker_code, access_level, hashedPassword, id]
       );
     } else {
-      // 2. Camino B: El usuario dejó el campo vacío (Mantenemos la contraseña antigua intacta)
+      // Camino B: El usuario dejó el campo vacío (Mantenemos la contraseña antigua)
       result = await pool.query(
         `UPDATE workers 
          SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4 
@@ -311,7 +318,6 @@ app.put('/workers/:id', async (req, res) => {
       );
     }
     
-    // Como siempre por seguridad, eliminamos el hash antes de responderle al celular
     const usuarioActualizado = result.rows[0];
     if (usuarioActualizado && usuarioActualizado.password) {
       delete usuarioActualizado.password;
@@ -337,21 +343,17 @@ app.delete('/workers/:id', async (req, res) => {
 app.post('/login', async (req, res) => {
   const { worker_code, password } = req.body;
   try {
-    // 1. Buscamos SOLO por el código del trabajador
     const result = await pool.query(
       'SELECT id, first_name, last_name, worker_code, access_level, password FROM workers WHERE worker_code = $1',
       [worker_code]
     );
 
-    // 2. Verificamos si el usuario existe
     if (result.rows.length > 0) {
       const user = result.rows[0];
       
-      // 3. Comparamos la contraseña en texto plano de la app con el hash de PostgreSQL
       const contrasenaValida = await bcrypt.compare(password, user.password);
 
       if (contrasenaValida) {
-        // Borramos el hash antes de enviar los datos del usuario al celular
         delete user.password;
         res.json({ success: true, user: user });
       } else {
