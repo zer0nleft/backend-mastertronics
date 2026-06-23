@@ -224,11 +224,18 @@ app.get('/stats/top-users', async (req, res) => {
 // 5. RUTAS CRUD PARA USUARIOS (MANTENIDAS EN POSTGRESQL)
 // ==========================================
 
+// GET: Leer todos los usuarios (Blindado: No envía contraseñas)
 app.get('/workers', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM workers ORDER BY id ASC'); 
+    // Especificamos exactamente qué columnas queremos, omitiendo 'password'
+    const result = await pool.query(`
+      SELECT id, first_name, last_name, worker_code, access_level 
+      FROM workers 
+      ORDER BY id ASC
+    `); 
     res.json(result.rows);
   } catch (error) {
+    console.error(error.message);
     res.status(500).json({ error: 'Error obteniendo usuarios' });
   }
 });
