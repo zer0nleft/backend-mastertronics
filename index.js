@@ -259,24 +259,45 @@ app.post('/workers', async (req, res) => {
   }
 });
 
+// PUT: Actualizar un usuario existente (Contraseña Opcional Blindada)
 app.put('/workers/:id', async (req, res) => {
   const { id } = req.params;
   const { first_name, last_name, worker_code, access_level, password } = req.body;
+  
   try {
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    let result;
 
-    const result = await pool.query(
-      `UPDATE workers SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4, password = $5 
-       WHERE id = $6 RETURNING *`, 
-      [first_name, last_name, worker_code, access_level, hashedPassword, id]
-    );
+    // Evaluamos si el frontend envió una contraseña que no esté en blanco
+    if (password && password.trim() !== '') {
+      // 1. Camino A: El usuario SÍ quiere cambiar la contraseña
+      const saltRounds = 10;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+      result = await pool.query(
+        `UPDATE workers 
+         SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4, password = $5 
+         WHERE id = $6 RETURNING *`, 
+        [first_name, last_name, worker_code, access_level, hashedPassword, id]
+      );
+    } else {
+      // 2. Camino B: El usuario dejó el campo vacío (Mantenemos la contraseña antigua intacta)
+      result = await pool.query(
+        `UPDATE workers 
+         SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4 
+         WHERE id = $5 RETURNING *`, 
+        [first_name, last_name, worker_code, access_level, id]
+      );
+    }
     
+    // Como siempre por seguridad, eliminamos el hash antes de responderle al celular
     const usuarioActualizado = result.rows[0];
-    delete usuarioActualizado.password;
+    if (usuarioActualizado && usuarioActualizado.password) {
+      delete usuarioActualizado.password;
+    }
 
     res.json(usuarioActualizado);
   } catch (error) {
+    console.error("Error al actualizar usuario:", error);
     res.status(500).json({ error: 'Error actualizando usuario' });
   }
 });
