@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
 
 const app = express();
 app.use(cors());
@@ -234,14 +235,26 @@ app.get('/workers', async (req, res) => {
 
 app.post('/workers', async (req, res) => {
   const { first_name, last_name, worker_code, access_level, password } = req.body;
+  
   try {
+    // 1. Definimos la complejidad del encriptado (10 es el estándar seguro y rápido)
+    const saltRounds = 10;
+    // 2. Encriptamos la contraseña (o '1234' si viene vacía)
+    const hashedPassword = await bcrypt.hash(password || '1234', saltRounds);
+
     const result = await pool.query(
       `INSERT INTO workers (first_name, last_name, worker_code, access_level, password) 
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [first_name, last_name, worker_code, access_level || 0, password || '1234'] 
+      [first_name, last_name, worker_code, access_level || 0, hashedPassword] 
     );
-    res.status(201).json(result.rows[0]);
+    
+    // Evitamos enviar el hash de vuelta a la app por seguridad
+    const nuevoUsuario = result.rows[0];
+    delete nuevoUsuario.password;
+    
+    res.status(201).json(nuevoUsuario);
   } catch (error) {
+    console.error("Error al crear usuario en BD:", error.message);
     res.status(500).json({ error: 'Error creando usuario' });
   }
 });
@@ -250,12 +263,19 @@ app.put('/workers/:id', async (req, res) => {
   const { id } = req.params;
   const { first_name, last_name, worker_code, access_level, password } = req.body;
   try {
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
     const result = await pool.query(
       `UPDATE workers SET first_name = $1, last_name = $2, worker_code = $3, access_level = $4, password = $5 
        WHERE id = $6 RETURNING *`, 
-      [first_name, last_name, worker_code, access_level, password, id]
+      [first_name, last_name, worker_code, access_level, hashedPassword, id]
     );
-    res.json(result.rows[0]);
+    
+    const usuarioActualizado = result.rows[0];
+    delete usuarioActualizado.password;
+
+    res.json(usuarioActualizado);
   } catch (error) {
     res.status(500).json({ error: 'Error actualizando usuario' });
   }
@@ -274,17 +294,31 @@ app.delete('/workers/:id', async (req, res) => {
 app.post('/login', async (req, res) => {
   const { worker_code, password } = req.body;
   try {
+    // 1. Buscamos SOLO por el código del trabajador
     const result = await pool.query(
-      'SELECT id, first_name, last_name, worker_code, access_level FROM workers WHERE worker_code = $1 AND password = $2',
-      [worker_code, password]
+      'SELECT id, first_name, last_name, worker_code, access_level, password FROM workers WHERE worker_code = $1',
+      [worker_code]
     );
 
+    // 2. Verificamos si el usuario existe
     if (result.rows.length > 0) {
-      res.json({ success: true, user: result.rows[0] });
+      const user = result.rows[0];
+      
+      // 3. Comparamos la contraseña en texto plano de la app con el hash de PostgreSQL
+      const contrasenaValida = await bcrypt.compare(password, user.password);
+
+      if (contrasenaValida) {
+        // Borramos el hash antes de enviar los datos del usuario al celular
+        delete user.password;
+        res.json({ success: true, user: user });
+      } else {
+        res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
+      }
     } else {
-      res.status(401).json({ success: false, error: 'Credenciales inválidas' });
+      res.status(404).json({ success: false, error: 'Usuario no encontrado' });
     }
   } catch (error) {
+    console.error('Error en el login:', error);
     res.status(500).json({ error: 'Error en el servidor' });
   }
 });
