@@ -280,3 +280,6 @@ app.get('/hardware/last-fingerprint', (req, res) => {
   huellaEnEspera = null; // Se limpia automáticamente
   res.json({ finger_id: huella }); 
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => { console.log(`Servidor corriendo en el puerto ${PORT}`); });
