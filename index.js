@@ -216,9 +216,17 @@ app.post('/login', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error en el servidor' }); }
 });
 
+
+
+
 // ==========================================
 // 6. RUTAS DEL HARDWARE NFC Y HUELLAS
 // ==========================================
+// NUEVAS VARIABLES DEDICADAS (Buzón de Registro Exclusivo)
+let nfcEnEspera = "";
+let huellaEnEspera = null;
+
+// --- RUTAS DE USO NORMAL (Vigilancia) ---
 app.post('/hardware/nfc-scan', async (req, res) => {
   const { rfid_code } = req.body;
   try {
@@ -228,16 +236,12 @@ app.post('/hardware/nfc-scan', async (req, res) => {
       await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'NFC Unlocked', is_unlocked: true }).save();
       res.json({ success: true, unlock: true }); 
     } else {
-      ultimaTarjetaDesconocida = rfid_code; 
       await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'NFC', last_name: 'Desconocido', action_type: 'NFC Denegado', is_unlocked: false }).save();
       res.json({ success: false, unlock: false });
     }
   } catch (error) { res.status(500).json({ error: 'Error NFC' }); }
 });
 
-app.get('/hardware/last-nfc', (req, res) => { res.json({ rfid_code: ultimaTarjetaDesconocida }); });
-
-// NUEVO: Escáner de Huella Dactilar
 app.post('/hardware/fingerprint-scan', async (req, res) => {
   const { finger_id } = req.body;
   try {
@@ -247,14 +251,32 @@ app.post('/hardware/fingerprint-scan', async (req, res) => {
       await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Biometric Unlocked', is_unlocked: true }).save();
       res.json({ success: true, unlock: true }); 
     } else {
-      ultimaHuellaDesconocida = finger_id; 
       await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'Huella', last_name: `No. ${finger_id}`, action_type: 'Biometric Denegado', is_unlocked: false }).save();
       res.json({ success: false, unlock: false });
     }
   } catch (error) { res.status(500).json({ error: 'Error Huella' }); }
 });
 
-app.get('/hardware/last-fingerprint', (req, res) => { res.json({ finger_id: ultimaHuellaDesconocida }); });
+// --- RUTAS DE MODO ADMINISTRADOR (Registro de nuevo hardware) ---
+app.post('/hardware/enroll-nfc', (req, res) => {
+  nfcEnEspera = req.body.rfid_code; // Guardamos en el buzón seguro
+  res.json({ success: true });
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => { console.log(`Servidor corriendo en el puerto ${PORT}`); });
+app.post('/hardware/enroll-fingerprint', (req, res) => {
+  huellaEnEspera = req.body.finger_id; // Guardamos en el buzón seguro
+  res.json({ success: true });
+});
+
+// --- RUTAS QUE LEE LA APLICACIÓN MÓVIL ---
+app.get('/hardware/last-nfc', (req, res) => { 
+  const codigo = nfcEnEspera;
+  nfcEnEspera = ""; // Se limpia automáticamente después de leerlo por seguridad
+  res.json({ rfid_code: codigo }); 
+});
+
+app.get('/hardware/last-fingerprint', (req, res) => { 
+  const huella = huellaEnEspera;
+  huellaEnEspera = null; // Se limpia automáticamente
+  res.json({ finger_id: huella }); 
+});
