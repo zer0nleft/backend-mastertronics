@@ -147,6 +147,51 @@ app.get('/stats/summary', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// --- NUEVA: Top Usuarios más activos (Versión MongoDB) ---
+app.get('/stats/top-users', async (req, res) => {
+  try {
+    const topUsers = await AccessLog.aggregate([
+      // Filtramos para no contar los bloqueos de desconocidos (worker_id: 0)
+      { $match: { worker_id: { $ne: 0 } } }, 
+      // Agrupamos por ID de trabajador y sumamos sus apariciones
+      { $group: { 
+          _id: "$worker_id", 
+          first_name: { $first: "$first_name" }, 
+          last_name: { $first: "$last_name" }, 
+          activity_count: { $sum: 1 } 
+      }},
+      // Ordenamos de mayor a menor y sacamos los 5 primeros
+      { $sort: { activity_count: -1 } },
+      { $limit: 5 }
+    ]);
+    res.json(topUsers);
+  } catch (error) { 
+    console.error("Error en Top Usuarios:", error);
+    res.status(500).json({ error: 'Error leyendo MongoDB' }); 
+  }
+});
+
+// --- NUEVA: Datos para el Reporte PDF (Versión MongoDB) ---
+app.get('/logs/report', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    // Adaptamos las fechas para abarcar los días completos (formato UTC-4)
+    const start = new Date(`${startDate}T00:00:00-04:00`);
+    const end = new Date(`${endDate}T23:59:59-04:00`);
+
+    // Buscamos en MongoDB con los operadores $gte (mayor o igual) y $lte (menor o igual)
+    const logs = await AccessLog.find({ 
+      created_at: { $gte: start, $lte: end } 
+    }).sort({ created_at: -1 });
+    
+    res.json(logs);
+  } catch (error) { 
+    console.error("Error en PDF:", error);
+    res.status(500).json({ error: 'Error leyendo MongoDB para el reporte' }); 
+  }
+});
+
 // ==========================================
 // 5. RUTAS CRUD PARA USUARIOS (POSTGRESQL) - ACTUALIZADO PARA HUELLAS
 // ==========================================
