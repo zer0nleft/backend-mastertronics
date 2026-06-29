@@ -50,8 +50,26 @@ let ultimaTarjetaDesconocida = "";
 let ultimaHuellaDesconocida = null; // NUEVO: Memoria para huellas
 
 // ==========================================
+// Middleware de Protección JWT
+// ==========================================
+const verificarToken = (req, res, next) => {
+  const token = req.header('Authorization');
+  if (!token) return res.status(401).json({ error: 'Acceso denegado. Se requiere token.' });
+
+  try {
+    // Verificamos si el token es válido y no ha expirado
+    const verificado = jwt.verify(token.replace('Bearer ', ''), JWT_SECRET);
+    req.user = verificado; // Guardamos los datos del usuario en la petición
+    next(); // Le permitimos pasar a la ruta
+  } catch (error) {
+    res.status(400).json({ error: 'Token no válido o expirado.' });
+  }
+};
+
+// ==========================================
 // 3. RUTAS DE HISTORIAL Y HARDWARE (MONGODB)
 // ==========================================
+// Nota: POST /logs no lleva verificarToken porque es usado por el ESP32
 app.post('/logs', async (req, res) => {
   const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
   try {
@@ -79,7 +97,7 @@ app.post('/logs', async (req, res) => {
   }
 });
 
-app.get('/logs', async (req, res) => {
+app.get('/logs', verificarToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -107,8 +125,7 @@ app.get('/logs', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error leyendo MongoDB' }); }
 });
 
-app.get('/logs/user/:id', async (req, res) => {
-  // Misma lógica de /logs pero filtrando por worker_id
+app.get('/logs/user/:id', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -127,6 +144,7 @@ app.get('/logs/user/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error obteniendo historial' }); }
 });
 
+// Nota: No lleva token, el ESP32 la utiliza para saber si debe abrir la puerta
 app.get('/hardware/lock-status', async (req, res) => {
   try {
     const isUnlocked = comandosPendientes[1] || false;
@@ -150,20 +168,16 @@ app.get('/stats/summary', verificarToken, async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// --- NUEVA: Top Usuarios más activos (Versión MongoDB) ---
-app.get('/stats/top-users',verificarToken, async (req, res) => {
+app.get('/stats/top-users', verificarToken, async (req, res) => {
   try {
     const topUsers = await AccessLog.aggregate([
-      // Filtramos para no contar los bloqueos de desconocidos (worker_id: 0)
       { $match: { worker_id: { $ne: 0 } } }, 
-      // Agrupamos por ID de trabajador y sumamos sus apariciones
       { $group: { 
           _id: "$worker_id", 
           first_name: { $first: "$first_name" }, 
           last_name: { $first: "$last_name" }, 
           activity_count: { $sum: 1 } 
       }},
-      // Ordenamos de mayor a menor y sacamos los 5 primeros
       { $sort: { activity_count: -1 } },
       { $limit: 5 }
     ]);
@@ -174,16 +188,12 @@ app.get('/stats/top-users',verificarToken, async (req, res) => {
   }
 });
 
-// --- NUEVA: Datos para el Reporte PDF (Versión MongoDB) ---
-app.get('/logs/report',verificarToken, async (req, res) => {
+app.get('/logs/report', verificarToken, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    
-    // Adaptamos las fechas para abarcar los días completos (formato UTC-4)
     const start = new Date(`${startDate}T00:00:00-04:00`);
     const end = new Date(`${endDate}T23:59:59-04:00`);
 
-    // Buscamos en MongoDB con los operadores $gte (mayor o igual) y $lte (menor o igual)
     const logs = await AccessLog.find({ 
       created_at: { $gte: start, $lte: end } 
     }).sort({ created_at: -1 });
@@ -196,7 +206,7 @@ app.get('/logs/report',verificarToken, async (req, res) => {
 });
 
 // ==========================================
-// 5. RUTAS CRUD PARA USUARIOS (POSTGRESQL) - ACTUALIZADO PARA HUELLAS
+// 5. RUTAS CRUD PARA USUARIOS (POSTGRESQL)
 // ==========================================
 app.get('/workers', verificarToken, async (req, res) => {
   try {
@@ -205,9 +215,8 @@ app.get('/workers', verificarToken, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error obteniendo usuarios' }); }
 });
 
-app.post('/workers', async (req, res) => {
+app.post('/workers', verificarToken, async (req, res) => {
   const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
-  // Convertimos string vacío a NULL para no romper la base de datos
   const f_id = (fingerprint_id && fingerprint_id !== '') ? parseInt(fingerprint_id) : null; 
   
   try {
@@ -222,7 +231,7 @@ app.post('/workers', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error creando usuario' }); }
 });
 
-app.put('/workers/:id', async (req, res) => {
+app.put('/workers/:id', verificarToken, async (req, res) => {
   const { id } = req.params;
   const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
   const f_id = (fingerprint_id && fingerprint_id !== '') ? parseInt(fingerprint_id) : null;
@@ -247,7 +256,7 @@ app.put('/workers/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error actualizando usuario' }); }
 });
 
-app.delete('/workers/:id', async (req, res) => {
+app.delete('/workers/:id', verificarToken, async (req, res) => {
   try { await pool.query('DELETE FROM workers WHERE id = $1', [req.params.id]); res.json({ message: 'OK' }); } catch (error) { res.status(500).json({ error: 'Error' }); }
 });
 
@@ -263,14 +272,12 @@ app.post('/login', async (req, res) => {
     if (match) {
       delete user.password;
       
-      // MAGIA JWT: Creamos el token que dura 8 horas
       const token = jwt.sign(
         { id: user.id, access_level: user.access_level }, 
         JWT_SECRET, 
         { expiresIn: '8h' }
       );
       
-      // Devolvemos el usuario Y el token
       res.json({ success: true, user: user, token: token });
     } else {
       res.status(401).json({ error: 'Contraseña incorrecta' });
@@ -280,30 +287,12 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Middleware de Protección JWT
-const verificarToken = (req, res, next) => {
-  const token = req.header('Authorization');
-  if (!token) return res.status(401).json({ error: 'Acceso denegado. Se requiere token.' });
-
-  try {
-    // Verificamos si el token es válido y no ha expirado
-    const verificado = jwt.verify(token.replace('Bearer ', ''), JWT_SECRET);
-    req.user = verificado; // Guardamos los datos del usuario en la petición
-    next(); // Le permitimos pasar a la ruta
-  } catch (error) {
-    res.status(400).json({ error: 'Token no válido o expirado.' });
-  }
-};
-
-
 // ==========================================
 // 6. RUTAS DEL HARDWARE NFC Y HUELLAS
 // ==========================================
-// NUEVAS VARIABLES DEDICADAS (Buzón de Registro Exclusivo)
 let nfcEnEspera = "";
 let huellaEnEspera = null;
 
-// --- RUTAS DE USO NORMAL (Vigilancia) ---
 app.post('/hardware/nfc-scan', async (req, res) => {
   const { rfid_code } = req.body;
   try {
@@ -334,27 +323,25 @@ app.post('/hardware/fingerprint-scan', async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error Huella' }); }
 });
 
-// --- RUTAS DE MODO ADMINISTRADOR (Registro de nuevo hardware) ---
 app.post('/hardware/enroll-nfc', (req, res) => {
-  nfcEnEspera = req.body.rfid_code; // Guardamos en el buzón seguro
+  nfcEnEspera = req.body.rfid_code;
   res.json({ success: true });
 });
 
 app.post('/hardware/enroll-fingerprint', (req, res) => {
-  huellaEnEspera = req.body.finger_id; // Guardamos en el buzón seguro
+  huellaEnEspera = req.body.finger_id;
   res.json({ success: true });
 });
 
-// --- RUTAS QUE LEE LA APLICACIÓN MÓVIL ---
-app.get('/hardware/last-nfc', (req, res) => { 
+app.get('/hardware/last-nfc', verificarToken, (req, res) => { 
   const codigo = nfcEnEspera;
-  nfcEnEspera = ""; // Se limpia automáticamente después de leerlo por seguridad
+  nfcEnEspera = ""; 
   res.json({ rfid_code: codigo }); 
 });
 
-app.get('/hardware/last-fingerprint', (req, res) => { 
+app.get('/hardware/last-fingerprint', verificarToken, (req, res) => { 
   const huella = huellaEnEspera;
-  huellaEnEspera = null; // Se limpia automáticamente
+  huellaEnEspera = null; 
   res.json({ finger_id: huella }); 
 });
 
