@@ -361,13 +361,33 @@ app.get('/hardware/last-fingerprint', verificarToken, (req, res) => {
 // ==========================================
 // RUTA TEMPORAL DE MANTENIMIENTO
 // ==========================================
+// ==========================================
+// RUTA TEMPORAL DE MANTENIMIENTO
+// ==========================================
 app.get('/reparar-db', async (req, res) => {
   try {
-    // Sincroniza el contador interno de IDs con el número más alto que exista
+    // 1. Le decimos a Postgres que permita guardar usuarios SIN tarjeta NFC
+    await pool.query('ALTER TABLE workers ALTER COLUMN worker_code DROP NOT NULL;');
+    
+    // 2. Hacemos lo mismo para la huella dactilar (por prevención)
+    await pool.query('ALTER TABLE workers ALTER COLUMN fingerprint_id DROP NOT NULL;');
+    
+    // 3. Limpiamos cualquier error de textos vacíos de pruebas anteriores
+    await pool.query("UPDATE workers SET worker_code = NULL WHERE worker_code = '';");
+    
+    // 4. Sincronizamos el contador automático de IDs
     await pool.query("SELECT setval(pg_get_serial_sequence('workers', 'id'), coalesce(max(id),0) + 1, false) FROM workers;");
-    res.send("<h1>¡Mantenimiento exitoso!</h1><p>El contador automático de PostgreSQL ha sido sincronizado. Cierra esta ventana y prueba crear un usuario en la app.</p>");
+    
+    res.send(`
+      <div style="font-family: sans-serif; padding: 40px; text-align: center;">
+        <h1 style="color: #4CAF50;">¡Cirugía de Base de Datos Exitosa! 🛠️</h1>
+        <p style="font-size: 18px;">Se han eliminado las restricciones estrictas.</p>
+        <p><strong>Ahora puedes crear usuarios sin necesidad de escanear una tarjeta o huella.</strong></p>
+        <p style="color: #666;">Cierra esta ventana y prueba en tu aplicación móvil.</p>
+      </div>
+    `);
   } catch (error) {
-    res.send("Error al reparar la base de datos: " + error.message);
+    res.send(`<h2 style="color: red;">Error en la cirugía SQL:</h2><p>${error.message}</p>`);
   }
 });
 const PORT = process.env.PORT || 3000;
