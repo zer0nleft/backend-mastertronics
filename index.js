@@ -217,24 +217,32 @@ app.get('/workers', verificarToken, async (req, res) => {
 
 app.post('/workers', verificarToken, async (req, res) => {
   const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
-  const f_id = (fingerprint_id && fingerprint_id !== '') ? parseInt(fingerprint_id) : null; 
+  
+  // Convertimos textos vacíos a null para evitar choques en PostgreSQL
+  const f_id = (fingerprint_id && fingerprint_id.toString().trim() !== '') ? parseInt(fingerprint_id) : null; 
+  const w_code = (worker_code && worker_code.trim() !== '') ? worker_code : null;
   
   try {
     const hashedPassword = await bcrypt.hash(password || '1234', 10);
     const result = await pool.query(
       `INSERT INTO workers (first_name, last_name, username, worker_code, fingerprint_id, access_level, password) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [first_name, last_name, username, worker_code, f_id, access_level || 0, hashedPassword] 
+      [first_name, last_name, username, w_code, f_id, access_level !== undefined ? access_level : 0, hashedPassword] 
     );
     const nuevoUsuario = result.rows[0];
     delete nuevoUsuario.password;
     res.status(201).json(nuevoUsuario);
-  } catch (error) { res.status(500).json({ error: 'Error creando usuario' }); }
+  } catch (error) { 
+    console.error("Error BD al crear:", error);
+    res.status(500).json({ error: 'Error creando usuario en PostgreSQL. Verifica datos duplicados.' }); 
+  }
 });
 
 app.put('/workers/:id', verificarToken, async (req, res) => {
   const { id } = req.params;
   const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
-  const f_id = (fingerprint_id && fingerprint_id !== '') ? parseInt(fingerprint_id) : null;
+  
+  const f_id = (fingerprint_id && fingerprint_id.toString().trim() !== '') ? parseInt(fingerprint_id) : null;
+  const w_code = (worker_code && worker_code.trim() !== '') ? worker_code : null;
 
   try {
     let result;
@@ -242,18 +250,21 @@ app.put('/workers/:id', verificarToken, async (req, res) => {
       const hashedPassword = await bcrypt.hash(password, 10);
       result = await pool.query(
         `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6, password = $7 WHERE id = $8 RETURNING *`, 
-        [first_name, last_name, username, worker_code, f_id, access_level, hashedPassword, id]
+        [first_name, last_name, username, w_code, f_id, access_level, hashedPassword, id]
       );
     } else {
       result = await pool.query(
         `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6 WHERE id = $7 RETURNING *`, 
-        [first_name, last_name, username, worker_code, f_id, access_level, id]
+        [first_name, last_name, username, w_code, f_id, access_level, id]
       );
     }
     const usuarioActualizado = result.rows[0];
     if (usuarioActualizado && usuarioActualizado.password) delete usuarioActualizado.password;
     res.json(usuarioActualizado);
-  } catch (error) { res.status(500).json({ error: 'Error actualizando usuario' }); }
+  } catch (error) { 
+    console.error("Error BD al actualizar:", error);
+    res.status(500).json({ error: 'Error actualizando usuario en PostgreSQL.' }); 
+  }
 });
 
 app.delete('/workers/:id', verificarToken, async (req, res) => {
