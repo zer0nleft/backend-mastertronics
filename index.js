@@ -233,7 +233,8 @@ app.post('/workers', verificarToken, async (req, res) => {
     res.status(201).json(nuevoUsuario);
   } catch (error) { 
     console.error("Error BD al crear:", error);
-    res.status(500).json({ error: 'Error creando usuario en PostgreSQL. Verifica datos duplicados.' }); 
+    // Cambiamos la alerta genérica por el error real de la base de datos
+    res.status(500).json({ error: `Falla SQL: ${error.message}` }); 
   }
 });
 
@@ -262,8 +263,9 @@ app.put('/workers/:id', verificarToken, async (req, res) => {
     if (usuarioActualizado && usuarioActualizado.password) delete usuarioActualizado.password;
     res.json(usuarioActualizado);
   } catch (error) { 
-    console.error("Error BD al actualizar:", error);
-    res.status(500).json({ error: 'Error actualizando usuario en PostgreSQL.' }); 
+    console.error("Error BD al crear:", error);
+    // Cambiamos la alerta genérica por el error real de la base de datos
+    res.status(500).json({ error: `Falla SQL: ${error.message}` }); 
   }
 });
 
@@ -356,5 +358,17 @@ app.get('/hardware/last-fingerprint', verificarToken, (req, res) => {
   res.json({ finger_id: huella }); 
 });
 
+// ==========================================
+// RUTA TEMPORAL DE MANTENIMIENTO
+// ==========================================
+app.get('/reparar-db', async (req, res) => {
+  try {
+    // Sincroniza el contador interno de IDs con el número más alto que exista
+    await pool.query("SELECT setval(pg_get_serial_sequence('workers', 'id'), coalesce(max(id),0) + 1, false) FROM workers;");
+    res.send("<h1>¡Mantenimiento exitoso!</h1><p>El contador automático de PostgreSQL ha sido sincronizado. Cierra esta ventana y prueba crear un usuario en la app.</p>");
+  } catch (error) {
+    res.send("Error al reparar la base de datos: " + error.message);
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { console.log(`Servidor corriendo en el puerto ${PORT}`); });
