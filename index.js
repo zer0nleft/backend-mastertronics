@@ -3,7 +3,10 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
+// En un entorno real esto va en variables de entorno, pero para tu proyecto podemos dejarlo así:
+const JWT_SECRET = process.env.JWT_SECRET || 'MASTERTRONICSSECRETKEY';
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -135,7 +138,7 @@ app.get('/hardware/lock-status', async (req, res) => {
 // ==========================================
 // 4. ESTADÍSTICAS
 // ==========================================
-app.get('/stats/summary', async (req, res) => {
+app.get('/stats/summary', verificarToken, async (req, res) => {
   try {
     const tzDate = new Date();
     const { startOfDay, endOfDay } = getCaracasDateRange(`${tzDate.getFullYear()}-${String(tzDate.getMonth() + 1).padStart(2, '0')}-${String(tzDate.getDate()).padStart(2, '0')}`);
@@ -148,7 +151,7 @@ app.get('/stats/summary', async (req, res) => {
 });
 
 // --- NUEVA: Top Usuarios más activos (Versión MongoDB) ---
-app.get('/stats/top-users', async (req, res) => {
+app.get('/stats/top-users',verificarToken, async (req, res) => {
   try {
     const topUsers = await AccessLog.aggregate([
       // Filtramos para no contar los bloqueos de desconocidos (worker_id: 0)
@@ -172,7 +175,7 @@ app.get('/stats/top-users', async (req, res) => {
 });
 
 // --- NUEVA: Datos para el Reporte PDF (Versión MongoDB) ---
-app.get('/logs/report', async (req, res) => {
+app.get('/logs/report',verificarToken, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     
@@ -195,7 +198,7 @@ app.get('/logs/report', async (req, res) => {
 // ==========================================
 // 5. RUTAS CRUD PARA USUARIOS (POSTGRESQL) - ACTUALIZADO PARA HUELLAS
 // ==========================================
-app.get('/workers', async (req, res) => {
+app.get('/workers', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(`SELECT id, first_name, last_name, username, worker_code, fingerprint_id, access_level FROM workers ORDER BY id ASC`); 
     res.json(result.rows);
@@ -249,19 +252,48 @@ app.delete('/workers/:id', async (req, res) => {
 });
 
 app.post('/login', async (req, res) => {
-  const { username, password } = req.body; 
+  const { username, password } = req.body;
   try {
-    const result = await pool.query('SELECT id, first_name, last_name, username, worker_code, access_level, password FROM workers WHERE username = $1', [username]);
-    if (result.rows.length > 0 && await bcrypt.compare(password, result.rows[0].password)) {
-      delete result.rows[0].password;
-      res.json({ success: true, user: result.rows[0] });
+    const result = await pool.query('SELECT * FROM workers WHERE username = $1', [username]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const user = result.rows[0];
+    const match = await bcrypt.compare(password, user.password);
+    
+    if (match) {
+      delete user.password;
+      
+      // MAGIA JWT: Creamos el token que dura 8 horas
+      const token = jwt.sign(
+        { id: user.id, access_level: user.access_level }, 
+        JWT_SECRET, 
+        { expiresIn: '8h' }
+      );
+      
+      // Devolvemos el usuario Y el token
+      res.json({ success: true, user: user, token: token });
     } else {
-      res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+      res.status(401).json({ error: 'Contraseña incorrecta' });
     }
-  } catch (error) { res.status(500).json({ error: 'Error en el servidor' }); }
+  } catch (error) { 
+    res.status(500).json({ error: 'Error en el servidor' }); 
+  }
 });
 
+// Middleware de Protección JWT
+const verificarToken = (req, res, next) => {
+  const token = req.header('Authorization');
+  if (!token) return res.status(401).json({ error: 'Acceso denegado. Se requiere token.' });
 
+  try {
+    // Verificamos si el token es válido y no ha expirado
+    const verificado = jwt.verify(token.replace('Bearer ', ''), JWT_SECRET);
+    req.user = verificado; // Guardamos los datos del usuario en la petición
+    next(); // Le permitimos pasar a la ruta
+  } catch (error) {
+    res.status(400).json({ error: 'Token no válido o expirado.' });
+  }
+};
 
 
 // ==========================================
