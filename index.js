@@ -392,3 +392,34 @@ app.get('/reparar-db', async (req, res) => {
 });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { console.log(`Servidor corriendo en el puerto ${PORT}`); });
+
+// ==========================================
+// RUTA DE EMERGENCIA: CREAR ADMIN INICIAL
+// ==========================================
+app.get('/setup-admin', async (req, res) => {
+  try {
+    // 1. El servidor genera el hash perfecto para "1234" con su propio motor
+    const hashedPassword = await bcrypt.hash('1234', 10);
+    
+    // 2. Lo insertamos en la base de datos.
+    // Dejamos la tarjeta y huella por fuera ya que ahora aceptan valores nulos.
+    await pool.query(
+      `INSERT INTO workers (first_name, last_name, username, access_level, password) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      ['Administrador', 'Principal', 'admin_maestro', 1, hashedPassword]
+    );
+    
+    res.send(`
+      <div style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h1 style="color: #2196F3;">¡Usuario Creado con Éxito! 🚀</h1>
+        <p style="font-size: 18px;">Ya puedes ir a tu aplicación móvil e iniciar sesión con estos datos:</p>
+        <div style="background: #eee; display: inline-block; padding: 20px; border-radius: 10px; margin-top: 10px;">
+          <p><strong>Usuario:</strong> admin_maestro</p>
+          <p><strong>Contraseña:</strong> 1234</p>
+        </div>
+      </div>
+    `);
+  } catch (error) {
+    res.send(`<h2 style="color: red;">Error al crear el usuario:</h2><p>${error.message}</p><p>Nota: Si dice "duplicate key value", significa que el usuario admin_maestro ya existe.</p>`);
+  }
+});
