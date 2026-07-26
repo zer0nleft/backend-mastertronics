@@ -38,12 +38,50 @@ const logSchema = new mongoose.Schema({
 
 const AccessLog = mongoose.model('AccessLog', logSchema);
 
+// ==========================================
+// MOTOR DE VALIDACIÓN DE HORARIOS
+// ==========================================
+
 const getCaracasDateRange = (dateStr) => {
   const startOfDay = new Date(`${dateStr}T00:00:00-04:00`);
   const endOfDay = new Date(`${dateStr}T23:59:59-04:00`);
   return { startOfDay, endOfDay };
 };
 
+// ==========================================
+// MOTOR DE VALIDACIÓN DE HORARIOS (BLINDADO)
+// ==========================================
+const isWithinSchedule = (user) => {
+  // 1. REGLA DE ORO: Si el usuario es Jefe (Nivel 1), entra siempre.
+  if (user.access_level === 1) return true;
+
+  // 2. Cálculo matemático infalible para la hora de Caracas (UTC -4)
+  const now = new Date();
+  const caracasOffset = -4 * 60; 
+  const localOffset = now.getTimezoneOffset(); 
+  const caracasTime = new Date(now.getTime() + (caracasOffset + localOffset) * 60000);
+  
+  // 3. Extraemos el día (Ajustamos para que Lunes=1 y Domingo=7)
+  let currentDay = caracasTime.getDay();
+  if (currentDay === 0) currentDay = 7; 
+
+  // 4. Extraemos la hora en formato HH:MM:00
+  const currentHour = caracasTime.getHours().toString().padStart(2, '0');
+  const currentMinute = caracasTime.getMinutes().toString().padStart(2, '0');
+  const currentTime = `${currentHour}:${currentMinute}:00`;
+
+  // 5. Validamos los días permitidos
+  const daysString = (user.schedule_days !== null && user.schedule_days !== undefined) ? user.schedule_days.toString() : '1,2,3,4,5,6,7';
+  const allowedDays = daysString.split(',').map(d => d.trim());
+  const hasDayAccess = allowedDays.includes(currentDay.toString());
+
+  // 6. Validamos el rango de horas
+  const startTime = user.start_time ? user.start_time.toString() : "00:00:00";
+  const endTime = user.end_time ? user.end_time.toString() : "23:59:59";
+  const hasTimeAccess = currentTime >= startTime && currentTime <= endTime;
+
+  return hasDayAccess && hasTimeAccess;
+};
 // COLA DE COMANDOS Y MEMORIAS TEMPORALES PARA REGISTRO
 const comandosPendientes = { 1: false };
 let ultimaTarjetaDesconocida = ""; 
@@ -210,61 +248,68 @@ app.get('/logs/report', verificarToken, async (req, res) => {
 // ==========================================
 app.get('/workers', verificarToken, async (req, res) => {
   try {
-    const result = await pool.query(`SELECT id, first_name, last_name, username, worker_code, fingerprint_id, access_level FROM workers ORDER BY id ASC`); 
+    const result = await pool.query(`SELECT id, first_name, last_name, username, worker_code, fingerprint_id, access_level, schedule_days, start_time, end_time FROM workers ORDER BY id ASC`); 
     res.json(result.rows);
   } catch (error) { res.status(500).json({ error: 'Error obteniendo usuarios' }); }
 });
 
 app.post('/workers', verificarToken, async (req, res) => {
-  const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
+  const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password, schedule_days, start_time, end_time } = req.body;
   
-  // Convertimos textos vacíos a null para evitar choques en PostgreSQL
   const f_id = (fingerprint_id && fingerprint_id.toString().trim() !== '') ? parseInt(fingerprint_id) : null; 
   const w_code = (worker_code && worker_code.trim() !== '') ? worker_code : null;
   
+  // Procesamos los horarios para evitar errores si vienen vacíos
+  const s_days = schedule_days !== undefined ? schedule_days : '1,2,3,4,5,6,7';
+  const s_time = start_time !== undefined ? start_time : '00:00:00';
+  const e_time = end_time !== undefined ? end_time : '23:59:59';
+
   try {
     const hashedPassword = await bcrypt.hash(password || '1234', 10);
     const result = await pool.query(
-      `INSERT INTO workers (first_name, last_name, username, worker_code, fingerprint_id, access_level, password) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [first_name, last_name, username, w_code, f_id, access_level !== undefined ? access_level : 0, hashedPassword] 
+      `INSERT INTO workers (first_name, last_name, username, worker_code, fingerprint_id, access_level, password, schedule_days, start_time, end_time) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [first_name, last_name, username, w_code, f_id, access_level !== undefined ? access_level : 0, hashedPassword, s_days, s_time, e_time] 
     );
     const nuevoUsuario = result.rows[0];
     delete nuevoUsuario.password;
     res.status(201).json(nuevoUsuario);
   } catch (error) { 
     console.error("Error BD al crear:", error);
-    // Cambiamos la alerta genérica por el error real de la base de datos
     res.status(500).json({ error: `Falla SQL: ${error.message}` }); 
   }
 });
 
 app.put('/workers/:id', verificarToken, async (req, res) => {
   const { id } = req.params;
-  const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password } = req.body;
+  const { first_name, last_name, username, worker_code, fingerprint_id, access_level, password, schedule_days, start_time, end_time } = req.body;
   
   const f_id = (fingerprint_id && fingerprint_id.toString().trim() !== '') ? parseInt(fingerprint_id) : null;
   const w_code = (worker_code && worker_code.trim() !== '') ? worker_code : null;
+
+  const s_days = schedule_days !== undefined ? schedule_days : '1,2,3,4,5,6,7';
+  const s_time = start_time !== undefined ? start_time : '00:00:00';
+  const e_time = end_time !== undefined ? end_time : '23:59:59';
 
   try {
     let result;
     if (password && password.trim() !== '') {
       const hashedPassword = await bcrypt.hash(password, 10);
       result = await pool.query(
-        `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6, password = $7 WHERE id = $8 RETURNING *`, 
-        [first_name, last_name, username, w_code, f_id, access_level, hashedPassword, id]
+        `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6, password = $7, schedule_days = $8, start_time = $9, end_time = $10 WHERE id = $11 RETURNING *`, 
+        [first_name, last_name, username, w_code, f_id, access_level, hashedPassword, s_days, s_time, e_time, id]
       );
     } else {
       result = await pool.query(
-        `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6 WHERE id = $7 RETURNING *`, 
-        [first_name, last_name, username, w_code, f_id, access_level, id]
+        `UPDATE workers SET first_name = $1, last_name = $2, username = $3, worker_code = $4, fingerprint_id = $5, access_level = $6, schedule_days = $7, start_time = $8, end_time = $9 WHERE id = $10 RETURNING *`, 
+        [first_name, last_name, username, w_code, f_id, access_level, s_days, s_time, e_time, id]
       );
     }
     const usuarioActualizado = result.rows[0];
     if (usuarioActualizado && usuarioActualizado.password) delete usuarioActualizado.password;
     res.json(usuarioActualizado);
   } catch (error) { 
-    console.error("Error BD al crear:", error);
-    // Cambiamos la alerta genérica por el error real de la base de datos
+    console.error("Error BD al actualizar:", error);
     res.status(500).json({ error: `Falla SQL: ${error.message}` }); 
   }
 });
@@ -309,11 +354,19 @@ let huellaEnEspera = null;
 app.post('/hardware/nfc-scan', async (req, res) => {
   const { rfid_code } = req.body;
   try {
-    const result = await pool.query('SELECT id, first_name, last_name FROM workers WHERE worker_code = $1', [rfid_code]);
+    const result = await pool.query('SELECT * FROM workers WHERE worker_code = $1', [rfid_code]);
     if (result.rows.length > 0) {
       const user = result.rows[0];
-      await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'NFC Unlocked', is_unlocked: true }).save();
-      res.json({ success: true, unlock: true }); 
+      
+      // NUEVO: Verificamos si está dentro de su horario
+      if (isWithinSchedule(user)) {
+        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'NFC Unlocked', is_unlocked: true }).save();
+        res.json({ success: true, unlock: true }); 
+      } else {
+        // Fuera de horario: Se registra en rojo y no se abre
+        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fuera de Horario (NFC)', is_unlocked: false }).save();
+        res.json({ success: false, unlock: false });
+      }
     } else {
       await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'NFC', last_name: 'Desconocido', action_type: 'NFC Denegado', is_unlocked: false }).save();
       res.json({ success: false, unlock: false });
@@ -322,18 +375,26 @@ app.post('/hardware/nfc-scan', async (req, res) => {
 });
 
 app.post('/hardware/fingerprint-scan', async (req, res) => {
-  const { finger_id } = req.body;
+  const { rfid_code } = req.body;
   try {
-    const result = await pool.query('SELECT id, first_name, last_name FROM workers WHERE fingerprint_id = $1', [finger_id]);
+    const result = await pool.query('SELECT * FROM workers WHERE worker_code = $1', [rfid_code]);
     if (result.rows.length > 0) {
       const user = result.rows[0];
-      await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Biometric Unlocked', is_unlocked: true }).save();
-      res.json({ success: true, unlock: true }); 
+      
+      // NUEVO: Verificamos si está dentro de su horario
+      if (isWithinSchedule(user)) {
+        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fingerprint Unlocked', is_unlocked: true }).save();
+        res.json({ success: true, unlock: true }); 
+      } else {
+        // Fuera de horario: Se registra en rojo y no se abre
+        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fuera de Horario (huella)', is_unlocked: false }).save();
+        res.json({ success: false, unlock: false });
+      }
     } else {
-      await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'Huella', last_name: `No. ${finger_id}`, action_type: 'Biometric Denegado', is_unlocked: false }).save();
+      await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'NFC', last_name: 'Desconocido', action_type: 'huella Denegada', is_unlocked: false }).save();
       res.json({ success: false, unlock: false });
     }
-  } catch (error) { res.status(500).json({ error: 'Error Huella' }); }
+  } catch (error) { res.status(500).json({ error: 'Error huella' }); }
 });
 
 app.post('/hardware/enroll-nfc', (req, res) => {
