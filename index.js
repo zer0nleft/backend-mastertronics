@@ -392,23 +392,26 @@ app.post('/hardware/nfc-scan', async (req, res) => {
 });
 
 app.post('/hardware/fingerprint-scan', async (req, res) => {
-  const { rfid_code } = req.body;
+  // CORRECCIÓN 1: Extraemos finger_id en lugar de rfid_code
+  const { finger_id } = req.body; 
+  
   try {
-    const result = await pool.query('SELECT * FROM workers WHERE worker_code = $1', [rfid_code]);
+    // CORRECCIÓN 2: Buscamos en la columna fingerprint_id
+    const result = await pool.query('SELECT * FROM workers WHERE fingerprint_id = $1', [finger_id]);
+    
     if (result.rows.length > 0) {
       const user = result.rows[0];
       
-      // NUEVO: Verificamos si está dentro de su horario
       if (isWithinSchedule(user)) {
         await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fingerprint Unlocked', is_unlocked: true }).save();
         res.json({ success: true, unlock: true }); 
       } else {
-        // Fuera de horario: Se registra en rojo y no se abre
-        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fuera de Horario (huella)', is_unlocked: false }).save();
+        await new AccessLog({ lock_id: 1, worker_id: user.id, first_name: user.first_name, last_name: user.last_name, action_type: 'Fuera de Horario (Huella)', is_unlocked: false }).save();
         res.json({ success: false, unlock: false });
       }
     } else {
-      await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'NFC', last_name: 'Desconocido', action_type: 'huella Denegada', is_unlocked: false }).save();
+      // CORRECCIÓN 3: Cambiamos los textos quemados de "NFC" a "Huella"
+      await new AccessLog({ lock_id: 1, worker_id: 0, first_name: 'Huella', last_name: 'Desconocida', action_type: 'Huella Denegada', is_unlocked: false }).save();
       res.json({ success: false, unlock: false });
     }
   } catch (error) { res.status(500).json({ error: 'Error huella' }); }
