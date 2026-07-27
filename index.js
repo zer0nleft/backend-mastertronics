@@ -135,32 +135,51 @@ app.post('/logs', async (req, res) => {
   }
 });
 
-app.get('/logs', verificarToken, async (req, res) => {
+// ==========================================
+// 3. RUTAS DE HISTORIAL Y HARDWARE (MONGODB)
+// ==========================================
+app.post('/logs', async (req, res) => {
+  const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
-    const date = req.query.date; 
-
-    let query = {};
-    if (date && date !== 'undefined' && date !== 'null') {
-      const { startOfDay, endOfDay } = getCaracasDateRange(date);
-      query.created_at = { $gte: startOfDay, $lte: endOfDay };
+    const ultimoLog = await AccessLog.findOne({ lock_id: lock_id }).sort({ created_at: -1 });
+    if (ultimoLog && (Date.now() - new Date(ultimoLog.created_at).getTime() < 3000)) { 
+      return res.status(429).json({ error: 'cooldown', message: 'El candado ya está abierto' });
     }
 
-    const [result, totalItems] = await Promise.all([
-      AccessLog.find(query).sort({ created_at: -1 }).skip(offset).limit(limit),
-      AccessLog.countDocuments(query)
-    ]);
+    // CAMBIO CLAVE: Usamos SELECT * para traer el horario (start_time, end_time, schedule_days, access_level)
+    const userResult = await pool.query('SELECT * FROM workers WHERE id = $1', [nfc_card_id]);
+    const user = userResult.rows[0] || { first_name: 'Usuario', last_name: 'Desconocido' };
 
-    const data = result.map(doc => ({
-      id: doc._id, lock_id: doc.lock_id, worker_id: doc.worker_id,
-      first_name: doc.first_name, last_name: doc.last_name,
-      action_type: doc.action_type, is_unlocked: doc.is_unlocked, created_at: doc.created_at
-    }));
+    // NUEVA VALIDACIÓN: Si es un usuario registrado y está FUERA del horario permitido
+    if (user.id && !isWithinSchedule(user)) {
+      const logDenegado = new AccessLog({
+        lock_id, worker_id: nfc_card_id, first_name: user.first_name,
+        last_name: user.last_name, action_type: 'Fuera de Horario (App)', is_unlocked: false
+      });
+      await logDenegado.save();
+      
+      // Enviamos estado 403 (Prohibido) y tu mensaje exacto a la app
+      return res.status(403).json({ 
+        error: 'horario', 
+        message: 'no se pudo abrir el candado porque estas en horario no permitido por la gerencia' 
+      });
+    }
 
-    res.json({ data, currentPage: page, totalPages: Math.ceil(totalItems / limit) || 1, totalItems });
-  } catch (error) { res.status(500).json({ error: 'Error leyendo MongoDB' }); }
+    // Si pasó la validación (está en horario o es Jefe), abre normalmente
+    const nuevoLog = new AccessLog({
+      lock_id, worker_id: nfc_card_id, first_name: user.first_name,
+      last_name: user.last_name, action_type: action_type || 'App Unlocked', is_unlocked: true
+    });
+
+    await nuevoLog.save();
+    comandosPendientes[lock_id] = true; // Activa el relé del ESP32
+    
+    const logData = nuevoLog.toObject();
+    logData.id = logData._id; 
+    res.status(201).json(logData);
+  } catch (error) {
+    res.status(500).json({ error: 'Error al insertar en MongoDB' });
+  }
 });
 
 app.get('/logs/user/:id', verificarToken, async (req, res) => {
