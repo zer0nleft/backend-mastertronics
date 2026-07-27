@@ -38,15 +38,6 @@ const logSchema = new mongoose.Schema({
 
 const AccessLog = mongoose.model('AccessLog', logSchema);
 
-// ==========================================
-// MOTOR DE VALIDACIÓN DE HORARIOS
-// ==========================================
-
-const getCaracasDateRange = (dateStr) => {
-  const startOfDay = new Date(`${dateStr}T00:00:00-04:00`);
-  const endOfDay = new Date(`${dateStr}T23:59:59-04:00`);
-  return { startOfDay, endOfDay };
-};
 
 // ==========================================
 // MOTOR DE VALIDACIÓN DE HORARIOS (BLINDADO)
