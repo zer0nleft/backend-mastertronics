@@ -51,6 +51,15 @@ const getCaracasDateRange = (dateStr) => {
 // ==========================================
 // MOTOR DE VALIDACIÓN DE HORARIOS (BLINDADO)
 // ==========================================
+// ==========================================
+// MOTOR DE FECHAS Y HORARIOS
+// ==========================================
+const getCaracasDateRange = (dateStr) => {
+  const startOfDay = new Date(`${dateStr}T00:00:00-04:00`);
+  const endOfDay = new Date(`${dateStr}T23:59:59-04:00`);
+  return { startOfDay, endOfDay };
+};
+
 const isWithinSchedule = (user) => {
   // 1. REGLA DE ORO: Si el usuario es Jefe (Nivel 1), entra siempre.
   if (user.access_level === 1) return true;
