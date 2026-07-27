@@ -107,7 +107,7 @@ const verificarToken = (req, res, next) => {
 // ==========================================
 // 3. RUTAS DE HISTORIAL Y HARDWARE (MONGODB)
 // ==========================================
-// Nota: POST /logs no lleva verificarToken porque es usado por el ESP32
+// Nota: POST /logs no lleva verificarToken porque es usado por el ESP32 y la App
 app.post('/logs', async (req, res) => {
   const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
   try {
@@ -116,37 +116,7 @@ app.post('/logs', async (req, res) => {
       return res.status(429).json({ error: 'cooldown', message: 'El candado ya está abierto' });
     }
 
-    const userResult = await pool.query('SELECT first_name, last_name FROM workers WHERE id = $1', [nfc_card_id]);
-    const user = userResult.rows[0] || { first_name: 'Usuario', last_name: 'Desconocido' };
-
-    const nuevoLog = new AccessLog({
-      lock_id, worker_id: nfc_card_id, first_name: user.first_name,
-      last_name: user.last_name, action_type, is_unlocked
-    });
-
-    await nuevoLog.save();
-    comandosPendientes[lock_id] = true; 
-    
-    const logData = nuevoLog.toObject();
-    logData.id = logData._id; 
-    res.status(201).json(logData);
-  } catch (error) {
-    res.status(500).json({ error: 'Error al insertar en MongoDB' });
-  }
-});
-
-// ==========================================
-// 3. RUTAS DE HISTORIAL Y HARDWARE (MONGODB)
-// ==========================================
-app.post('/logs', async (req, res) => {
-  const { lock_id, nfc_card_id, action_type, is_unlocked } = req.body;
-  try {
-    const ultimoLog = await AccessLog.findOne({ lock_id: lock_id }).sort({ created_at: -1 });
-    if (ultimoLog && (Date.now() - new Date(ultimoLog.created_at).getTime() < 3000)) { 
-      return res.status(429).json({ error: 'cooldown', message: 'El candado ya está abierto' });
-    }
-
-    // CAMBIO CLAVE: Usamos SELECT * para traer el horario (start_time, end_time, schedule_days, access_level)
+    // Usamos SELECT * para traer el horario (start_time, end_time, schedule_days, access_level)
     const userResult = await pool.query('SELECT * FROM workers WHERE id = $1', [nfc_card_id]);
     const user = userResult.rows[0] || { first_name: 'Usuario', last_name: 'Desconocido' };
 
@@ -182,6 +152,35 @@ app.post('/logs', async (req, res) => {
   }
 });
 
+// ¡ESTA ES LA RUTA QUE FALTABA PARA QUE LA APP PUEDA LEER EL HISTORIAL!
+app.get('/logs', verificarToken, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const date = req.query.date; 
+
+    let query = {};
+    if (date && date !== 'undefined' && date !== 'null') {
+      const { startOfDay, endOfDay } = getCaracasDateRange(date);
+      query.created_at = { $gte: startOfDay, $lte: endOfDay };
+    }
+
+    const [result, totalItems] = await Promise.all([
+      AccessLog.find(query).sort({ created_at: -1 }).skip(offset).limit(limit),
+      AccessLog.countDocuments(query)
+    ]);
+
+    const data = result.map(doc => ({
+      id: doc._id, lock_id: doc.lock_id, worker_id: doc.worker_id,
+      first_name: doc.first_name, last_name: doc.last_name,
+      action_type: doc.action_type, is_unlocked: doc.is_unlocked, created_at: doc.created_at
+    }));
+
+    res.json({ data, currentPage: page, totalPages: Math.ceil(totalItems / limit) || 1, totalItems });
+  } catch (error) { res.status(500).json({ error: 'Error leyendo MongoDB' }); }
+});
+
 app.get('/logs/user/:id', verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -209,7 +208,6 @@ app.get('/hardware/lock-status', async (req, res) => {
     res.json({ unlocked: isUnlocked });
   } catch (error) { res.status(500).json({ error: 'Error leyendo estado del hardware' }); }
 });
-
 // ==========================================
 // 4. ESTADÍSTICAS
 // ==========================================
